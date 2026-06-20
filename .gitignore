@@ -1,0 +1,42 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment
+.env
+.env.local
+
+# Data — large, regenerable from APIs
+data/audio/
+data/raw/
+data/interim/
+data/processed/
+!data/.gitkeep
+
+# Unused root export (42 MB, regenerable via the pipeline)
+/dataset.csv
+
+# Hugging Face / Torch caches
+.cache/
+hf_cache/
