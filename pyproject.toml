@@ -21,6 +21,7 @@ dependencies = [
 [project.scripts]
 animethemes-pipeline = "src.pipeline:main"
 animethemes-recommend = "src.recommend:main"
+animethemes-evaluate = "src.evaluate:main"
 
 [build-system]
 requires = ["setuptools>=68", "wheel"]
