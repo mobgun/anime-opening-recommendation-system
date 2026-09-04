@@ -1,7 +1,7 @@
 [project]
 name = "anime-themes-recsys"
 version = "0.1.0"
-description = "Dataset pipeline for an anime OP/ED recommendation system: joins MyAnimeList metadata with AnimeThemes audio and produces MERT embeddings."
+description = "Anime OP/ED recommender: joins MyAnimeList metadata with AnimeThemes audio, embeds it with MERT, and evaluates the ranking against independent ground truths."
 requires-python = ">=3.10"
 dependencies = [
     "httpx>=0.27",

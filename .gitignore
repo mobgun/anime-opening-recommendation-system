@@ -28,10 +28,9 @@ Thumbs.db
 .env.local
 
 # Data — large, regenerable from APIs
-data/audio/
-data/raw/
-data/interim/
-data/processed/
+# Everything under data/ is regenerable; list the whole tree rather than named
+# subdirectories, so a new one (data/experiments/, say) cannot slip into a commit.
+data/*
 !data/.gitkeep
 
 # Unused root export (42 MB, regenerable via the pipeline)
@@ -40,3 +39,4 @@ data/processed/
 # Hugging Face / Torch caches
 .cache/
 hf_cache/
+experiments/
