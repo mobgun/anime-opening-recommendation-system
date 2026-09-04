@@ -95,12 +95,14 @@ class MERTEmbedder:
         sample_idx = torch.arange(t_in, device=self.device).unsqueeze(0)
         sample_mask = (sample_idx < sample_lens.unsqueeze(1)).long()
 
+        layer = self.cfg.embed_layer
         out = self.model(
             input_values=input_values,
             attention_mask=sample_mask,
-            output_hidden_states=False,
+            output_hidden_states=layer != -1,
         )
-        hidden = out.last_hidden_state  # (B, T_feat, H)
+        # every layer falls out of the same forward pass, so selecting one costs nothing
+        hidden = out.last_hidden_state if layer == -1 else out.hidden_states[layer]  # (B, T, H)
         t_feat = hidden.shape[1]
 
         feat_lens = self._feature_lengths(sample_lens, t_feat)

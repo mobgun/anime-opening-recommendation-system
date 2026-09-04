@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import logging
 import sys
+from pathlib import Path
 from typing import Sequence
 
 import numpy as np
@@ -23,13 +24,23 @@ SMOKE_SEEDS: list[int] = [
 
 
 class Recommender:
-    def __init__(self, cfg: Config) -> None:
+    def __init__(
+        self,
+        cfg: Config,
+        dataset_path: Path | None = None,
+        strict_embed_check: bool = True,
+    ) -> None:
+        """`dataset_path` / `strict_embed_check` exist so experiments can score an
+        alternative embedding (a different MERT layer, a hand-built baseline) through
+        the exact same ranking code the CLI uses."""
         self.cfg = cfg
-        df = pd.read_parquet(cfg.dataset_parquet)
+        self.dataset_path = dataset_path or cfg.dataset_parquet
+        df = pd.read_parquet(self.dataset_path)
         if df.empty:
-            raise SystemExit(f"dataset is empty: {cfg.dataset_parquet}")
+            raise SystemExit(f"dataset is empty: {self.dataset_path}")
 
-        self._validate_embed_metadata(df)
+        if strict_embed_check:
+            self._validate_embed_metadata(df)
 
         raw = np.stack([np.asarray(v, dtype=np.float32) for v in df["embedding"].to_numpy()])
         if raw.ndim != 2:
@@ -44,7 +55,11 @@ class Recommender:
                 f"Offending theme_ids (sample): {offenders}. "
                 f"Re-run Stage 4 for these themes or drop them from the dataset."
             )
-        self.E: np.ndarray = (raw / norms).astype(np.float32, copy=False)
+
+        vecs = self._whiten(raw)
+        self.E: np.ndarray = (vecs / np.linalg.norm(vecs, axis=1, keepdims=True)).astype(
+            np.float32, copy=False
+        )
 
         self.df = df.reset_index(drop=True)
         self.theme_id_to_idx: dict[int, int] = {
@@ -80,6 +95,48 @@ class Recommender:
             len(all_genres),
             self.E.shape[1],
         )
+
+    def _whiten(self, raw: np.ndarray) -> np.ndarray:
+        """Decorrelate the embedding space and equalize the retained directions.
+
+        Fitted on the corpus being ranked, using no labels — it is a rescaling of the
+        audio space, not learning from genre or artist. Keep `components` well below
+        the point where singular values approach `eps`: the tail directions are noise,
+        and dividing by a near-zero singular value amplifies exactly that noise.
+        """
+        cfg = self.cfg
+        k = cfg.recommend_whiten_components
+        if k <= 0:
+            self.whiten_info: dict[str, object] = {"enabled": False}
+            return raw
+        k = min(k, *raw.shape)
+
+        x = raw.astype(np.float64, copy=False)
+        mean = x.mean(axis=0, keepdims=True)
+        centered = x - mean
+        _, sv, vt = np.linalg.svd(centered, full_matrices=False)
+        scale = (sv[:k] / np.sqrt(len(x))) ** cfg.recommend_whiten_alpha + cfg.recommend_whiten_eps
+        out = (centered @ vt[:k].T) / scale
+
+        dead = np.linalg.norm(out, axis=1) <= 0
+        if dead.any():
+            raise SystemExit(
+                f"{int(dead.sum())} embeddings collapsed to zero after whitening; "
+                f"lower RECOMMEND_WHITEN_COMPONENTS (now {k}) or set it to 0."
+            )
+        self.whiten_info = {
+            "enabled": True,
+            "components": int(k),
+            "alpha": float(cfg.recommend_whiten_alpha),
+            "variance_kept": float((sv[:k] ** 2).sum() / (sv**2).sum()),
+        }
+        log.info(
+            "whitening: %d components, alpha=%.2f, %.1f%% of variance kept",
+            k,
+            cfg.recommend_whiten_alpha,
+            100 * self.whiten_info["variance_kept"],
+        )
+        return out
 
     def _validate_embed_metadata(self, df: pd.DataFrame) -> None:
         bad_model = df["embed_model"] != self.cfg.embed_model
@@ -302,9 +359,13 @@ def _run_smoke(rec: Recommender) -> int:
                     f"theme_id={seed}: no sibling found in comfort top-20 "
                     f"(siblings exist: {siblings[:5]})"
                 )
-            elif r_purist is not None and r_comfort >= r_purist:
+            # Comfort weights same-anime up, so it must never rank a sibling worse than
+            # purist. It cannot be required to rank one *better*: once purist already
+            # puts a sibling at rank 1 there is nowhere left to move it, and demanding
+            # a strict improvement turns a good audio ranking into a test failure.
+            elif r_purist is not None and r_comfort > r_purist:
                 failures.append(
-                    f"theme_id={seed}: comfort sibling rank ({r_comfort}) is not better "
+                    f"theme_id={seed}: comfort sibling rank ({r_comfort}) is worse "
                     f"than purist ({r_purist}); L2 wiring suspect"
                 )
 

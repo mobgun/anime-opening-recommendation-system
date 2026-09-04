@@ -37,6 +37,13 @@ class Config:
     chunk_seconds: int = field(default_factory=lambda: _env_int("CHUNK_SECONDS", 30))
     n_chunks: int = field(default_factory=lambda: _env_int("N_CHUNKS", 3))
     chunk_stride: int = field(default_factory=lambda: _env_int("CHUNK_STRIDE", 30))
+    # Which transformer layer to pool. -1 is the final hidden state, which is what
+    # this pipeline used originally and which measured *worst* of all 13: the top of
+    # the stack specializes toward the pre-training objective, while musical style
+    # sits in the middle. Layer 6 won a held-out sweep (experiments/sweep_layers.py);
+    # layers 4-10 are all comparable, so this is a plateau, not a knife edge.
+    # Layer 0 is the conv feature projection.
+    embed_layer: int = field(default_factory=lambda: _env_int("EMBED_LAYER", 6))
     embed_batch_size: int = field(default_factory=lambda: _env_int("EMBED_BATCH_SIZE", 16))
     embed_flush_every: int = field(default_factory=lambda: _env_int("EMBED_FLUSH_EVERY", 50))
 
@@ -73,6 +80,22 @@ class Config:
     )
     recommend_max_per_anime: int = field(
         default_factory=lambda: _env_int("RECOMMEND_MAX_PER_ANIME", 5)
+    )
+
+    # MERT embeddings are strongly anisotropic — the mean cosine between two
+    # unrelated themes is ~0.92, so most of the vector length sits in a handful of
+    # directions shared by everything and the part that distinguishes songs is
+    # squeezed into the tail. Projecting onto the top components and dividing by
+    # their singular values gives every retained direction equal say. Set
+    # components to 0 to rank on the raw embeddings instead.
+    recommend_whiten_components: int = field(
+        default_factory=lambda: _env_int("RECOMMEND_WHITEN_COMPONENTS", 256)
+    )
+    recommend_whiten_alpha: float = field(
+        default_factory=lambda: _env_float("RECOMMEND_WHITEN_ALPHA", 1.0)
+    )
+    recommend_whiten_eps: float = field(
+        default_factory=lambda: _env_float("RECOMMEND_WHITEN_EPS", 1e-5)
     )
 
     @property
@@ -119,7 +142,26 @@ class Config:
     @property
     def embed_version(self) -> str:
         """Derived from chunk hyperparameters so config drift invalidates stale embeddings."""
-        return f"sr{self.target_sr}-c{self.chunk_seconds}x{self.n_chunks}s{self.chunk_stride}"
+        base = f"sr{self.target_sr}-c{self.chunk_seconds}x{self.n_chunks}s{self.chunk_stride}"
+        # -1 stays unsuffixed so datasets built before the layer knob remain valid
+        return base if self.embed_layer == -1 else f"{base}-L{self.embed_layer}"
+
+    @property
+    def mb_artists_json(self) -> Path:
+        """Corpus artists resolved to MusicBrainz ids (experiments/resolve_artists.py).
+
+        A freshly fetched cache under data/ wins; otherwise the copy pinned in
+        benchmarks/ is used, so the behavioural metric reproduces without re-querying
+        two external services (and keeps working if either changes its answers).
+        """
+        local = self.raw_dir / "mb_artists.json"
+        return local if local.exists() else Path("benchmarks") / "mb_artists.json"
+
+    @property
+    def lb_similar_json(self) -> Path:
+        """Listener-derived artist similarity (experiments/fetch_similar_artists.py)."""
+        local = self.raw_dir / "lb_similar_artists.json"
+        return local if local.exists() else Path("benchmarks") / "lb_similar_artists.json"
 
     @property
     def dataset_parquet(self) -> Path:

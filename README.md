@@ -7,6 +7,13 @@ It joins **MyAnimeList** metadata (via [Jikan](https://jikan.moe/)) with
 songs that *sound* similar to a seed theme — with tunable bias toward the same
 artist/era and control over how adventurous the results are.
 
+It also measures whether that works, against two independent ground truths the audio
+never sees, with random baselines and paired significance tests
+([Evaluation](#evaluation)). On the reference corpus, audio-only ranking puts a song by
+one of the seed's own artists at **rank 1 for 22% of seeds — 53x what chance gives** —
+and the two ground truths disagree about one of the changes that produced it, which the
+README says out loud rather than rounding off.
+
 ## How it works
 
 The pipeline runs in five stages (see [`src/pipeline.py`](src/pipeline.py)):
@@ -16,14 +23,17 @@ The pipeline runs in five stages (see [`src/pipeline.py`](src/pipeline.py)):
 | `themes` | Fetch OP/ED themes from the AnimeThemes API                        | `data/raw/animethemes.parquet`  |
 | `mal`    | Fetch MyAnimeList metadata via Jikan                               | `data/raw/mal.parquet`          |
 | `audio`  | Download `.ogg` audio for each theme                               | `data/audio/*.ogg`              |
-| `embed`  | Compute MERT embeddings per theme                                  | `data/interim/embeddings/*.parquet` |
+| `embed`  | Compute MERT embeddings per theme (layer `EMBED_LAYER`, default 6) | `data/interim/embeddings/*.parquet` |
 | `join`   | Inner-join themes ⨝ MAL ⨝ embeddings, drop errored themes         | `data/processed/dataset.parquet` |
 
-The recommender (`src/recommend.py`) loads `dataset.parquet`, ranks by cosine
-similarity over the embeddings, and blends in metadata signals (artist, era, genre).
-See [Example output](#example-output) for what it returns and
-[Evaluation](#evaluation) for how well it does — `src/evaluate.py` scores the
-ranking against metadata the embeddings never saw.
+The recommender ([`src/recommend.py`](src/recommend.py)) loads `dataset.parquet`,
+whitens the embedding space, ranks by cosine similarity, and blends in metadata signals
+(artist, era, genre). Both the whitening and the choice of MERT layer came out of
+measurements, not intuition — [`src/evaluate.py`](src/evaluate.py) scores the ranking
+against metadata the embeddings never saw, and is how you would check any further change.
+
+See [Example output](#example-output) for what it returns and [Evaluation](#evaluation)
+for how well it does.
 
 ## Installation
 
@@ -39,7 +49,32 @@ pip install -r requirements.txt
 pip install -e .
 ```
 
-Requires Python 3.10+. A GPU is recommended for the `embed` stage but not required.
+Requires Python 3.10+.
+
+**GPU:** `pip install torch` resolves to a **CPU-only** wheel on Windows, so the command
+above gives you a CPU build even on a machine with a working CUDA card — on the hardware
+this project was built on that turned a 5-minute embed stage into a 100-minute one.
+For CUDA, install torch from PyTorch's own index instead:
+
+```bash
+pip install --index-url https://download.pytorch.org/whl/cu126 torch
+python -c "import torch; print(torch.__version__, torch.cuda.is_available())"
+```
+
+Pick the `cuXXX` matching your driver (`nvidia-smi`); cu126 and cu130 both cover Ada
+(RTX 40-series). The check must print `True` — if it prints a version ending in `+cpu`,
+the CUDA wheel did not install. Should pip stall on the ~2.6 GB download (it did here,
+repeatedly, on an otherwise healthy connection), fetch the wheel directly and install
+from the file:
+
+```bash
+curl -L -C - --retry 10 --speed-time 60 --speed-limit 10000 \
+  -o torch-cu126.whl \
+  "https://download.pytorch.org/whl/cu126/torch-2.14.0%2Bcu126-cp312-cp312-win_amd64.whl"
+pip install --no-deps --force-reinstall torch-cu126.whl
+```
+
+The `embed` stage runs on CPU without complaint; it is just ~18x slower.
 
 ## Usage
 
@@ -77,126 +112,286 @@ a few built-in seed themes).
 
 ## Example output
 
-Real output from the reference dataset described under [Evaluation](#evaluation).
-Seed: **Death Note OP1 — "THE WORLD" (Nightmare)**, `theme_id=2279`.
+Real output from the reference corpus described under [Evaluation](#evaluation).
+
+**Death Note OP2 — "What's up people?" (Maximum the Hormone)**, `theme_id=2280`:
 
 ```bash
-animethemes-recommend --seed-theme-id 2279 --mode purist --k 4 --exclude-same-anime
+animethemes-recommend --seed-theme-id 2280 --mode purist --k 5 --exclude-same-anime
 ```
 
 | # | Anime | Theme | Song | Artist | Year | `cos` |
 |---|-------|-------|------|--------|------|-------|
-| 1 | Nanatsu no Taizai | OP1 | Netsujou no Spectrum | Ikimonogakari | 2014 | 0.966 |
-| 2 | Fullmetal Alchemist: Brotherhood | ED1 | Uso | SID | 2009 | 0.966 |
-| 3 | Bleach | ED26 | Song for... | ROOKiEZ is PUNK'D | 2004 | 0.966 |
-| 4 | Naruto: Shippuuden | OP12 | Moshimo | — | 2007 | 0.964 |
+| 1 | Chainsaw Man | ED3 | Hawatari 2-Oku Centi | **Maximum the Hormone** | 2022 | 0.117 |
+| 2 | Naruto: Shippuuden | ED20 | By My Side | — | 2007 | 0.112 |
+| 3 | Naruto: Shippuuden | OP17 | Kaze | Yamazaru | 2007 | 0.106 |
+| 4 | Fairy Tail | OP14 | Fairy Tail: Yakusoku no Hi | — | 2009 | 0.106 |
+| 5 | Fairy Tail | ED6 | Be As One | — | 2009 | 0.098 |
 
-Four band-driven J-rock tracks with a male lead and a wall-of-guitar chorus —
-which is what the seed is. Nothing in the ranking knows that: `purist` uses the
-embedding alone, and that embedding was built from at most 90 seconds of audio
-(60 s for this seed — see `total_seconds_used` in the dataset).
+Rank 1 is the same band, sixteen years and one unrelated series later. The ranking
+never saw the artist column — `purist` scores audio only, and that audio was at most
+90 seconds per theme. This is exactly what [`artist_recall@1`](#evaluation) counts,
+and it happens for 22% of the seeds that have such a partner.
 
-Same seed in `discovery`, the default mode, which folds artist/genre/era into the
-score:
+A second seed, same show, different sound. **Death Note OP1 — "THE WORLD"
+(Nightmare)**, `theme_id=2279`:
 
-```bash
-animethemes-recommend --seed-theme-id 2279 --k 4 --exclude-same-anime
-```
+| # | Anime | Theme | Song | Artist | Year | `cos` |
+|---|-------|-------|------|--------|------|-------|
+| 1 | Bleach | ED26 | Song for... | ROOKiEZ is PUNK'D | 2004 | 0.163 |
+| 2 | One Piece | OP12 | Kaze wo Sagashite | — | 1999 | 0.148 |
+| 3 | Fairy Tail | OP8 | The Rock City Boy | — | 2009 | 0.119 |
+| 4 | One Piece | ED8 | Shining ray | — | 1999 | 0.114 |
+| 5 | Ao no Exorcist | OP2 | IN MY WORLD | ROOKiEZ is PUNK'D | 2011 | 0.113 |
 
-| # | Anime | Theme | Song | Artist | Year | `cos` | `final` |
-|---|-------|-------|------|--------|------|-------|---------|
-| 1 | Mirai Nikki (TV) | OP2 | Dead END | Faylan | 2011 | 0.939 | 1.019 |
-| 2 | Mirai Nikki (TV) | OP1 | Kuusou Mesorogiwi | Yousei Teikoku | 2011 | 0.937 | 1.017 |
-| 3 | Bleach | ED26 | Song for... | ROOKiEZ is PUNK'D | 2004 | 0.966 | 1.016 |
-| 4 | Mirai Nikki (TV) | ED1 | Blood Teller | Faylan | 2011 | 0.929 | 1.009 |
+Five guitar-driven rock tracks with a male lead, and ranks 1 and 5 are the same band
+seven years apart — picked out of 617 candidates without ever consulting a credit.
 
-The metadata term pulls in the Mirai Nikki cluster — one genre-neighbourhood over
-from Death Note (Suspense, Supernatural) and a nearby era — while rank 3 holds its
-place on audio alone. Cap the franchise pile-up with `--max-per-anime 1`.
-
-Swap the seed and the neighbourhood swaps with it: `--seed-theme-id 3434`
-(FMA:B OP1 — "again", YUI) returns Akame ga Kill! ED2 (Sora Amamiya), Shigatsu wa
-Kimi no Uso OP2 (Coala Mode.), Tate no Yuusha no Nariagari ED3 (Chiai Fujikawa)
-and Nanatsu no Taizai OP1 (Ikimonogakari) — four female-vocal tracks for a
-female-vocal seed.
+The default `discovery` mode folds artist/genre/era back into the score, pulling
+results toward the seed's own neighbourhood; cap franchise pile-ups with
+`--max-per-anime 1`.
 
 Notes on reading the tables: the CLI also prints `theme_id`, `mal_id`, `audio_id`,
-`anime_score` and `l2_weight`, dropped here for width. `—` means AnimeThemes has
-no artist linked to that song. And `cos` is raw cosine over MERT embeddings, which
-are anisotropic — two *random* themes in this dataset already score 0.918 on
-average — so read the ordering, not the absolute value.
+`anime_score`, `l2_weight` and `final`, dropped here for width. `—` means AnimeThemes
+has no artist linked to that song. `cos` is cosine in the whitened embedding space,
+where two unrelated themes score ~0.00 — so unlike raw MERT cosine (which starts at
+0.92 for *everything*) the number itself carries information.
 
 ## Evaluation
 
 `animethemes-evaluate` scores the recommender against metadata it never saw: the
 embeddings come from audio only, while genre, artist and air date come from
-MyAnimeList. Every metric is printed next to what a *random* top-k scores on the
-same candidate pool, because that pool is lopsided — two thirds of random theme
-pairs already share a genre — so the lift is the part that carries information.
-
-**Headline: in audio-only ranking, 22% of seeds pull a song by one of their own
-artists into the top 10 — 5.4× the 4.0% a random pick gets.**
+MyAnimeList. Every metric is printed next to what a *random* ranking scores on the
+same candidate pool, because that pool is lopsided — two thirds of random theme pairs
+already share a genre — so the lift is the part that carries information.
 
 ```bash
-animethemes-evaluate --k 10           # add --json data/processed/eval.json to save
+animethemes-evaluate --json benchmarks/layer6-whitened.json
 ```
 
-| metric | value | 95% CI | random | lift | seeds |
-|--------|-------|--------|--------|------|-------|
-| `artist_recall@10` | **0.219** | [0.161, 0.276] | 0.040 | **5.43×** | 192 |
-| `genre_precision@10` | 0.721 | [0.699, 0.743] | 0.684 | 1.05× | 621 |
-| `genre_jaccard@10` | 0.337 | [0.322, 0.352] | 0.304 | 1.11× | 621 |
-| `era_precision@10` | 0.176 | [0.165, 0.189] | 0.157 | 1.12× | 614 |
+**Artist agreement** is the metric with teeth: does the ranking surface another song
+by one of the seed's own artists? Ground truth is hard, and the seed's own anime is
+excluded, so a hit is never the same song or a sibling OP. Scored over the 192 seeds
+where such a theme exists, median candidate pool 617.
 
-- `artist_recall@10` — at least one of the 10 results is by an artist behind the
-  seed song. Scored only over the 192 seeds where such a theme exists in *another*
-  anime, so a hit is never the same song or a sibling OP.
-- `genre_precision@10` / `genre_jaccard@10` — share of results sharing ≥1 MAL
-  genre with the seed, and mean Jaccard overlap of the full genre sets.
-- `era_precision@10` — share of results that aired within ±2 years of the seed.
+| metric | value | 95% CI | random | lift |
+|--------|-------|--------|--------|------|
+| `artist_recall@1` | **0.219** | [0.167, 0.276] | 0.004 | **53.0x** |
+| `artist_recall@3` | 0.344 | [0.281, 0.417] | 0.012 | 27.9x |
+| `artist_recall@5` | 0.406 | [0.344, 0.479] | 0.020 | 19.9x |
+| `artist_recall@10` | 0.479 | [0.411, 0.552] | 0.040 | 11.9x |
+| `artist_recall@20` | 0.615 | [0.547, 0.682] | 0.079 | 7.8x |
+| `artist_recall@100` | 0.802 | [0.740, 0.859] | 0.328 | 2.5x |
+| `artist_mrr` | **0.311** | [0.259, 0.371] | 0.023 | 13.8x |
+| median rank of first hit | **12** | — | 217 | — |
 
-Reference dataset: `animethemes-pipeline run --stage all --top-n 100` → **621
-themes across 98 anime**, `m-a-p/MERT-v1-95M`, up to 3×30 s chunks @ 24 kHz.
-Evaluation is leave-one-out over every theme, with the seed's own anime excluded
-from the candidate pool. Random baselines are closed-form per seed (hypergeometric for
-artist recall, pool means for the rest), not sampled; intervals are 1000-resample
-bootstraps over seeds.
+### How it got there
 
-**Why `purist` is the default here.** `discovery` and `comfort` add artist and
-genre terms *into the score*, so scoring them on artist and genre is circular —
-`--mode discovery` reports `artist_recall@10 = 0.99`, which measures the weighting,
-not the audio. Pass `--mode` to see it for yourself.
+Two changes, neither of them to the model, the audio or the data — both to how the
+embeddings are *read*. Read the [second ground truth](#what-the-two-ground-truths-disagree-about)
+below before taking this table as a quality improvement: one of the two changes moves
+this metric and not the other one. Every frozen run is in [`benchmarks/`](benchmarks/), all on the
+same 621 themes (`corpus_sha256 c6d1d706ed8b9390`).
 
-**What the numbers say.** Artist recall is the real result: it has hard ground
-truth, and audio similarity finds a same-artist track 5.4× more often than chance.
-Genre and era barely move — which is the expected answer, not a bug. MERT hears
-timbre and instrumentation, not whether a show is shelved under Action; and with
-68% of random pairs already sharing a genre, there is little headroom left to win.
+| configuration | MRR | recall@1 | median rank |
+|---------------|-----|----------|-------------|
+| MERT last layer, raw cosine — as originally written | 0.128 | 0.078 | 62 |
+| librosa MFCC/chroma/contrast baseline, whitened | 0.172 | 0.115 | 46 |
+| MERT last layer + whitening | 0.229 | 0.146 | 23 |
+| **MERT layer 6 + whitening** | **0.311** | **0.219** | **12** |
 
-**What they don't say.** 621 themes from 98 anime is a small, popularity-skewed
-pool, and one franchise (One Piece, 67 themes) is a tenth of it. These are
-retrieval statistics on a fixed corpus, not a held-out generalization estimate.
-Whether two openings actually *sound* alike stays a listening judgement that no
-metadata proxy settles — the metrics say the embedding is not noise, not that the
-recommendations are good.
+**Whitening.** Raw MERT vectors are strongly anisotropic — mean cosine between two
+unrelated themes is 0.918, so almost all of the vector length points in directions
+every song shares and what distinguishes songs survives only in the tail. Project onto
+the top 256 principal components, divide by their singular values, renormalize; mean
+off-diagonal cosine drops to −0.002. `RECOMMEND_WHITEN_COMPONENTS` in
+[`src/config.py`](src/config.py), 0 to disable.
+
+**Layer choice.** The pipeline originally pooled MERT's final hidden state, which a
+sweep of all 13 layers found to be the **worst** of them: the top of the stack
+specializes toward the pre-training objective while musical style sits in the middle.
+Layers 4-10 all score 0.30-0.32 on held-out seeds against 0.21 for the last layer — a
+plateau, not a spike. `EMBED_LAYER=6` is the default; every layer falls out of one
+forward pass, so the sweep cost one embed run, not thirteen
+([`experiments/sweep_layers.py`](experiments/sweep_layers.py)).
+
+**How both were validated.** Each change was selected on half the seeds and scored on
+the other half, split by *anime* so no show straddles the split, then compared **paired
+per seed** — comparing two overlapping confidence intervals is the wrong test when both
+systems score the same seeds.
+
+| change | held-out paired ΔMRR | 95% CI |
+|--------|---------------------|--------|
+| whitening | +0.085 | [+0.034, +0.137] |
+| layer 12 → 6 | +0.105 | [+0.036, +0.173] |
+| MERT vs librosa baseline (both whitened) | +0.057 | [+0.010, +0.106] |
+
+**A second ground truth, and why it matters.** Artist agreement has a known weakness:
+two songs by one performer share a voice, a band and a mastering chain, so a system can
+score well by recognising the *singer* rather than the music. In MIR that effect is
+normally treated as a confound to filter out — we made it the target. The evidence that
+this is not paranoia: a plain MFCC vector (the classic **speaker-identification** feature
+set) reaches 75% of MERT's artist score.
+
+So the corpus's artists were resolved to MusicBrainz ids and joined with ListenBrainz's
+listener-derived artist similarity — which artists actually turn up together in real
+listening sessions. `related_*` asks whether the audio ranking surfaces a theme by a
+**different** artist that listeners treat as adjacent. Different singer, different
+production, so the confound cannot carry it.
+
+| metric | value | 95% CI | random | lift |
+|--------|-------|--------|--------|------|
+| `related_recall@10` | 0.283 | [0.231, 0.339] | 0.164 | 1.7x |
+| `related_recall@20` | 0.450 | [0.394, 0.508] | 0.296 | 1.5x |
+| `related_mrr` | 0.121 | [0.098, 0.146] | 0.072 | 1.7x |
+
+Scored over 307 seeds — more than the 192 artist agreement reaches. Relevance is the top
+3 listener-derived neighbours per artist; the full list of 100 marks 15% of the corpus as
+relevant, which leaves a random top-10 scoring 0.80 and no headroom to measure anything.
+The ground truth is pinned in [`benchmarks/`](benchmarks/) so the metric reproduces
+without re-querying either service.
+
+### What the two ground truths disagree about
+
+This is the uncomfortable part, and it is the reason both are now reported.
+
+| configuration | `artist_mrr` (n=192) | `related_mrr` (n=307) |
+|---------------|----------------------|------------------------|
+| layer 12, raw — as originally written | 0.128 | 0.123 |
+| layer 12 + whitening | 0.229 | **0.093** |
+| **layer 6 + whitening — current** | **0.311** | 0.121 |
+| layer 6, raw | 0.228 | 0.128 |
+
+Paired against the original system on the behavioural metric: layer 12 + whitening is
+**significantly worse** (−0.030, CI [−0.055, −0.008]); the current configuration is
+**−0.002, CI [−0.031, +0.028] — not significant**. In other words the 2.4x reported above
+belongs to the metric that rewards recognising a performer. On listener-derived
+relatedness, none of it is demonstrably better than where the pipeline started.
+
+The mechanism is measurable: whitening more than doubles how many same-artist tracks sit
+in a top-10 (0.129 → 0.242 per seed, 0.291 at layer 6), and those crowd out the
+different-artist neighbours the behavioural metric counts.
+
+**Why whitening is still on.** At layer 6 specifically, the direct paired test says
+whitening gains **+0.084 (CI [+0.036, +0.132], significant)** on artist agreement and
+costs **−0.007 (CI [−0.034, +0.022], not significant)** on relatedness. The significant
+harm was at layer 12; the better layer largely dissolves it. Trading a measured gain for
+an undetectable one would be the wrong call — but note that "not significant" here means
+a real cost up to ~0.034 could hide inside that interval. `RECOMMEND_WHITEN_COMPONENTS=0`
+turns it off, and layer 6 raw is the configuration to use if relatedness matters more
+than performer identity for your use.
+
+**The general lesson.** Two of the three changes in this project were chosen against a
+single metric, and the second ground truth shows that one of them bought nothing outside
+it. That is why both families are printed on every run: not because the behavioural one is
+truer — it is noisier, its lift is 1.7x against artist agreement's 12x, and ListenBrainz's
+listener base skews away from Japanese music — but because a single number is exactly how
+a recommender drifts into being a voice detector without anyone noticing.
+
+**Negative controls.** Genre and era agreement barely move (0.708 vs 0.684 random;
+0.187 vs 0.157) and that is expected rather than broken — MERT hears timbre, not
+whether a show is shelved under Action. Their baselines sit near the ceiling, so they
+cannot discriminate; they are printed to catch regressions, not to be optimized.
+
+**Reference corpus.** `animethemes-pipeline run --stage all --top-n 100` → 621 themes
+across 98 anime, `m-a-p/MERT-v1-95M` layer 6, up to 3x30 s chunks @ 24 kHz. Evaluation
+is leave-one-out over every theme with the seed's own anime excluded. Random baselines
+are closed-form per seed (hypergeometric for recall, the exact first-hit distribution
+for MRR), not sampled; intervals are 1000-resample bootstraps over seeds. Because
+`--top-n 100` ranks by *current* MAL popularity it is a moving target, so the exact
+theme ids are pinned in [`benchmarks/corpus-621.txt`](benchmarks/corpus-621.txt).
+
+**Why `purist` is the default here.** `discovery` and `comfort` add artist and genre
+terms *into the score*, so scoring them on artist and genre is circular —
+`--mode discovery` reports `artist_recall@10 = 0.99`, which measures the weighting, not
+the audio.
+
+**What this still does not establish.** Aggregates move; individual seeds do not follow.
+The layer change improved 95 seeds and hurt 75, and one recommendation this README used
+to showcase (YUI's "again" surfacing her "Rolling Star") fell from rank 4 to rank 24 —
+better on average is not better everywhere. 621 themes from 98 anime is also small and
+popularity-skewed, one franchise (One Piece, 67 themes) being a tenth of it. And
+"sounds similar" remains a listening judgement that no metadata proxy settles: artist
+agreement is a proxy for musical identity, not for whether a human would enjoy the
+result.
+
+## Experiments
+
+Every number in [Evaluation](#evaluation) came from a script in
+[`experiments/`](experiments/), kept in the repo so the claims can be re-derived rather
+than believed. They are one-off analyses, not part of the pipeline.
+
+| script | what it answers |
+|--------|-----------------|
+| [`extract_variants.py`](experiments/extract_variants.py) | Builds every candidate embedding in one pass over the audio: all 13 MERT layers (they fall out of a single forward pass) plus a librosa MFCC/chroma/contrast baseline. `--skip-mert` builds only the baseline, on CPU. |
+| [`sweep_layers.py`](experiments/sweep_layers.py) | Which layer to pool. Selects on half the anime, reports on the other half, compares paired per seed. |
+| [`resolve_artists.py`](experiments/resolve_artists.py) | Resolves the corpus's 217 artists to MusicBrainz ids (95% hit rate). Romanized names match through MusicBrainz aliases — which is why this works at artist level and fails at track level. Cached and resumable; honours the 1 req/s limit. |
+| [`fetch_similar_artists.py`](experiments/fetch_similar_artists.py) | Pulls listener-derived artist similarity from ListenBrainz, the ground truth behind `related_*`. |
+
+```bash
+python -m experiments.extract_variants --skip-mfcc     # needs audio on disk (KEEP_AUDIO=true)
+python -m experiments.sweep_layers
+python -m experiments.resolve_artists && python -m experiments.fetch_similar_artists
+```
+
+To compare any two configurations the way this project's decisions were made — paired
+per seed, on **both** ground truths at once:
+
+```bash
+animethemes-evaluate --compare-to data/experiments/layer12.parquet --no-embed-check
+```
+
+It prints a warning when the two ground truths disagree in sign, which is the case this
+project ran into and the reason the comparison covers both.
 
 ## Configuration
 
 All settings live in [`src/config.py`](src/config.py) and can be overridden via
 environment variables (optionally through a `.env` file — see
-[`.env.example`](.env.example)). **No secrets are required**; the public
-AnimeThemes and Jikan APIs need no API key. Common knobs include `EMBED_MODEL`,
-`TARGET_SR`, `CHUNK_SECONDS`, `JIKAN_RATE_PER_SEC`, and the `RECOMMEND_*` weights.
+[`.env.example`](.env.example)). **No secrets are required**: every service this project
+touches — AnimeThemes, Jikan, MusicBrainz, ListenBrainz — is public and needs no key.
+
+The knobs that change results the most, both measured in [Evaluation](#evaluation):
+
+| variable | default | effect |
+|----------|---------|--------|
+| `EMBED_LAYER` | `6` | Which MERT layer to pool. `-1` (the final layer) measured worst of all 13. Changing it invalidates the embedding cache — rerun `embed --force-reembed`. |
+| `RECOMMEND_WHITEN_COMPONENTS` | `256` | Whitening; `0` ranks on raw vectors. Buys performer recognition, costs a little relatedness — see [the disagreement](#what-the-two-ground-truths-disagree-about). Applied at load, so no re-embed needed. |
+
+The rest — `EMBED_MODEL`, `TARGET_SR`, `CHUNK_SECONDS`, `JIKAN_RATE_PER_SEC`, the
+`RECOMMEND_*` blend weights — are documented in `.env.example`.
 
 ## Data
 
 Everything under `data/` is **regenerable from the public APIs** and is therefore
-git-ignored — only the code lives in this repository. Run the pipeline to populate
-it locally. Data sources:
+git-ignored. Run the pipeline to populate it locally.
+
+[`benchmarks/`](benchmarks/) is the exception and *is* committed, because evaluation
+results are worthless if the thing they were measured on has drifted: it holds the frozen
+metric runs, the pinned list of 621 theme ids (`--top-n 100` tracks live MAL popularity,
+so the corpus itself moves), and the artist ground truth resolved from MusicBrainz and
+ListenBrainz — 186 KB, so `related_*` reproduces without re-querying either service.
+
+Data sources:
 
 - [AnimeThemes API](https://api.animethemes.moe) — theme audio & metadata
 - [Jikan](https://api.jikan.moe/v4) — MyAnimeList metadata
 - [`m-a-p/MERT-v1-95M`](https://huggingface.co/m-a-p/MERT-v1-95M) — audio embeddings
+- [MusicBrainz](https://musicbrainz.org) — artist identity (romanized names resolve through its aliases)
+- [ListenBrainz](https://listenbrainz.org) — listener-derived artist similarity
+
+The two music-metadata services are only needed to rebuild the behavioural ground truth;
+both are volunteer-run, and the scripts honour their rate limits.
+
+## Limitations
+
+Stated once, in one place, so they are not scattered through the numbers:
+
+- **The corpus is small and skewed.** 621 themes from 98 anime, chosen by MAL popularity; one franchise (One Piece) is 67 of them. These are retrieval statistics on a fixed corpus, not a generalization estimate.
+- **Nobody has listened.** Every number here is a metadata proxy. No human has judged a single recommendation, and the two ground truths already disagree with each other.
+- **The default mode is unmeasured.** Evaluation runs in `purist`; the shipped default is `discovery`, which folds artist and genre into the score — scoring it on artist and genre would be circular, so it is simply not measured.
+- **Artist coverage caps the metrics.** AnimeThemes links no artist for 38% of themes, so `artist_*` scores 192 seeds and `related_*` scores 307, out of 621.
+- **`related_*` is the weaker instrument.** Its lift over chance is ~1.7x against artist agreement's ~12x, and ListenBrainz's listener base skews away from Japanese music.
 
 ## License
 
