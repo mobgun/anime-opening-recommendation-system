@@ -4,12 +4,12 @@ import argparse
 import logging
 import sys
 from pathlib import Path
-from typing import Sequence
 
 import numpy as np
 import pandas as pd
 
 from .config import Config
+from .console import enable_utf8_output
 
 log = logging.getLogger(__name__)
 
@@ -348,7 +348,7 @@ def _run_smoke(rec: Recommender) -> int:
             if rec.mal_id[rec.theme_id_to_idx[int(t)]] == same_mal and int(t) != seed
         ]
         if siblings:
-            def best_rank(df: pd.DataFrame) -> int | None:
+            def best_rank(df: pd.DataFrame, siblings: list[int] = siblings) -> int | None:
                 hits = df.index[df["theme_id"].isin(siblings)].tolist()
                 return int(df.loc[hits[0], "rank"]) if hits else None
 
@@ -379,6 +379,7 @@ def _run_smoke(rec: Recommender) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
+    enable_utf8_output()
     parser = argparse.ArgumentParser(prog="animethemes-recommend")
     parser.add_argument("--seed-theme-id", type=int, default=None)
     parser.add_argument("--mode", choices=list(MODE_SCALE), default=None)
@@ -395,7 +396,8 @@ def main(argv: list[str] | None = None) -> int:
         "--max-per-anime",
         type=int,
         default=None,
-        help="cap themes from the same anime (default: cfg.recommend_max_per_anime; pass 0 to disable)",
+        help="cap themes from the same anime "
+        "(default: cfg.recommend_max_per_anime; pass 0 to disable)",
     )
     parser.add_argument("--smoke", action="store_true")
     parser.add_argument("--log-level", default="INFO")
@@ -417,7 +419,9 @@ def main(argv: list[str] | None = None) -> int:
 
     mode = args.mode or cfg.recommend_default_mode
     k = args.k if args.k is not None else cfg.recommend_default_k
-    max_per_anime = args.max_per_anime if args.max_per_anime is not None else cfg.recommend_max_per_anime
+    max_per_anime = (
+        args.max_per_anime if args.max_per_anime is not None else cfg.recommend_max_per_anime
+    )
     df = rec.recommend(
         seed_theme_id=args.seed_theme_id,
         mode=mode,

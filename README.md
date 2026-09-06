@@ -44,12 +44,23 @@ python -m venv .venv
 # Linux/macOS:
 # source .venv/bin/activate
 
-pip install -r requirements.txt
-# or, to install the console scripts:
 pip install -e .
 ```
 
 Requires Python 3.10+.
+
+**Torch is an optional extra.** The core install has no `torch`, because only the
+`embed` stage needs one — the recommender, the evaluator and the other four stages
+run on numpy and pandas. So `pip install -e .` is enough to rank and score a prebuilt
+`dataset.parquet` without pulling a ~2.6 GB wheel. To build embeddings yourself:
+
+```bash
+pip install -e ".[embed]"   # transformers, torch, torchaudio, librosa, soundfile
+pip install -e ".[dev]"     # pytest, ruff
+```
+
+Running `--stage embed` without the extra fails with a message telling you this,
+rather than a `ModuleNotFoundError` traceback.
 
 **GPU:** `pip install torch` resolves to a **CPU-only** wheel on Windows, so the command
 above gives you a CPU build even on a machine with a working CUDA card — on the hardware
@@ -281,6 +292,24 @@ a real cost up to ~0.034 could hide inside that interval. `RECOMMEND_WHITEN_COMP
 turns it off, and layer 6 raw is the configuration to use if relatedness matters more
 than performer identity for your use.
 
+**What the behavioural metric says when it gets to choose.** The layer was originally
+selected on artist agreement alone, which is precisely the objection this section
+raises. So the sweep now runs the selection separately under each ground truth
+(`--family both`), and the answer is reassuring for the layer if not for the effect
+size: given its own tune half and no knowledge of the artist metric, the behavioural
+family **also selects layer 6** (tune MRR 0.126, the best of all 13).
+
+| ground truth | selects | holdout ΔMRR vs layer 12 | 95% CI | verdict |
+|--------------|---------|--------------------------|--------|---------|
+| artist (n=105 holdout) | layer06 | +0.105 | [+0.036, +0.173] | significant |
+| behavioural (n=163 holdout) | layer06 | +0.017 | [−0.018, +0.053] | not significant |
+
+So the two ground truths agree on *which* layer, and disagree only on whether the
+improvement is demonstrable — the behavioural metric points the same way but is too
+noisy to prove it. That is a materially weaker claim than "significant on both", and a
+materially stronger one than "chosen against a metric that measures the confound".
+Whitening remains the change where the disagreement is real.
+
 **The general lesson.** Two of the three changes in this project were chosen against a
 single metric, and the second ground truth shows that one of them bought nothing outside
 it. That is why both families are printed on every run: not because the behavioural one is
@@ -324,13 +353,14 @@ than believed. They are one-off analyses, not part of the pipeline.
 | script | what it answers |
 |--------|-----------------|
 | [`extract_variants.py`](experiments/extract_variants.py) | Builds every candidate embedding in one pass over the audio: all 13 MERT layers (they fall out of a single forward pass) plus a librosa MFCC/chroma/contrast baseline. `--skip-mert` builds only the baseline, on CPU. |
-| [`sweep_layers.py`](experiments/sweep_layers.py) | Which layer to pool. Selects on half the anime, reports on the other half, compares paired per seed. |
+| [`sweep_layers.py`](experiments/sweep_layers.py) | Which layer to pool. Selects on half the anime, reports on the other half, compares paired per seed. `--family {artist,behavioural,both}` picks which ground truth the *selection* optimizes; `both` is the default and states plainly when they disagree. |
 | [`resolve_artists.py`](experiments/resolve_artists.py) | Resolves the corpus's 217 artists to MusicBrainz ids (95% hit rate). Romanized names match through MusicBrainz aliases — which is why this works at artist level and fails at track level. Cached and resumable; honours the 1 req/s limit. |
 | [`fetch_similar_artists.py`](experiments/fetch_similar_artists.py) | Pulls listener-derived artist similarity from ListenBrainz, the ground truth behind `related_*`. |
 
 ```bash
 python -m experiments.extract_variants --skip-mfcc     # needs audio on disk (KEEP_AUDIO=true)
-python -m experiments.sweep_layers
+python -m experiments.sweep_layers                     # both ground truths
+python -m experiments.sweep_layers --family behavioural
 python -m experiments.resolve_artists && python -m experiments.fetch_similar_artists
 ```
 
@@ -343,6 +373,34 @@ animethemes-evaluate --compare-to data/experiments/layer12.parquet --no-embed-ch
 
 It prints a warning when the two ground truths disagree in sign, which is the case this
 project ran into and the reason the comparison covers both.
+
+## Tests
+
+```bash
+pip install -e ".[dev]"
+pytest -q
+ruff check .
+```
+
+116 tests, no network, no GPU, no audio — everything runs on synthetic corpora built
+so the right answer is known in advance (planted near-duplicate pairs, planted artist
+partners), plus one suite that re-derives the real numbers.
+
+What they actually defend:
+
+| suite | what would otherwise break silently |
+|-------|--------------------------------------|
+| [`test_random_baselines.py`](tests/test_random_baselines.py) | Every "53x chance" in this README is a ratio, and these functions are its denominator. They are checked against an **independently derived** closed form (hypergeometric via `math.comb`, and `P(R=r) = C(n-r, m-1)/C(n, m)` for MRR) rather than a restatement of the same expression, then against 200k-trial simulation. A bug here would scale every lift in the README by the same factor and nothing else would notice. |
+| [`test_whitening.py`](tests/test_whitening.py) | The geometric claim whitening rests on — that mean off-diagonal cosine collapses from >0.9 to ~0 — asserted directly on a corpus built with the MERT pathology. |
+| [`test_recommender.py`](tests/test_recommender.py) | Ranking order, dedup, `--max-per-anime`, mode scaling, and that `metadata_weights` stays normalized into [0, 1] (otherwise `final = cos + scale * alpha * w` means nothing). |
+| [`test_evaluate.py`](tests/test_evaluate.py) | Corpora with a known correct metric value: a planted partner ranked first must score `artist_mrr = 1.0`, ranked last must score `1/7`. Also the sign and pairing of `paired_mrr_delta`. |
+| [`test_embed_store.py`](tests/test_embed_store.py) | The staleness guard — the thing that stops a dataset silently mixing vectors from two different models, an error that produces plausible recommendations and no warning. |
+| [`test_console_output.py`](tests/test_console_output.py) | Regression test for a real crash: AnimeThemes titles contain `〜`, `★`, `√`, `♡`, and on a Windows console codepage printing one raised `UnicodeEncodeError` and killed the CLI on 7 of the 621 themes. |
+| [`test_benchmark_regression.py`](tests/test_benchmark_regression.py) | Re-scores the live code against [`benchmarks/layer6-whitened.json`](benchmarks/) and asserts **every frozen metric and every per-seed rank**. This is the one that would catch a change leaving all the unit tests green while moving `artist_mrr` by 0.05. Self-skips without `data/processed/dataset.parquet`, and skips with a reason if `corpus_sha256` has drifted, because metrics across different corpora are not comparable. |
+
+CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs lint and tests on
+Linux and Windows, Python 3.10 and 3.12. Windows is in the matrix deliberately: the
+console bug above is invisible on Linux.
 
 ## Configuration
 
@@ -390,6 +448,7 @@ Stated once, in one place, so they are not scattered through the numbers:
 - **The corpus is small and skewed.** 621 themes from 98 anime, chosen by MAL popularity; one franchise (One Piece) is 67 of them. These are retrieval statistics on a fixed corpus, not a generalization estimate.
 - **Nobody has listened.** Every number here is a metadata proxy. No human has judged a single recommendation, and the two ground truths already disagree with each other.
 - **The default mode is unmeasured.** Evaluation runs in `purist`; the shipped default is `discovery`, which folds artist and genre into the score — scoring it on artist and genre would be circular, so it is simply not measured.
+- **Whitening is fitted on the corpus being ranked.** It is unsupervised and sees no labels, but it is refitted at every load, so there is no persisted transform to project a new theme into an existing space. Adding one theme means refitting on everything.
 - **Artist coverage caps the metrics.** AnimeThemes links no artist for 38% of themes, so `artist_*` scores 192 seeds and `related_*` scores 307, out of 621.
 - **`related_*` is the weaker instrument.** Its lift over chance is ~1.7x against artist agreement's ~12x, and ListenBrainz's listener base skews away from Japanese music.
 

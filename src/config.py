@@ -48,7 +48,9 @@ class Config:
     embed_flush_every: int = field(default_factory=lambda: _env_int("EMBED_FLUSH_EVERY", 50))
 
     animethemes_base_url: str = "https://api.animethemes.moe"
-    animethemes_page_size: int = field(default_factory=lambda: _env_int("ANIMETHEMES_PAGE_SIZE", 100))
+    animethemes_page_size: int = field(
+        default_factory=lambda: _env_int("ANIMETHEMES_PAGE_SIZE", 100)
+    )
 
     jikan_base_url: str = "https://api.jikan.moe/v4"
     jikan_rate_per_sec: float = field(default_factory=lambda: _env_float("JIKAN_RATE_PER_SEC", 3.0))

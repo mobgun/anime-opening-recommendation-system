@@ -125,7 +125,9 @@ def main(argv: list[str] | None = None) -> int:
             cache[name] = resolve_one(client, name)
             if len(cache) % 25 == 0:
                 args.cache.parent.mkdir(parents=True, exist_ok=True)
-                args.cache.write_text(json.dumps(cache, ensure_ascii=False, indent=1), encoding="utf-8")
+                args.cache.write_text(
+                    json.dumps(cache, ensure_ascii=False, indent=1), encoding="utf-8"
+                )
     finally:
         args.cache.parent.mkdir(parents=True, exist_ok=True)
         args.cache.write_text(json.dumps(cache, ensure_ascii=False, indent=1), encoding="utf-8")

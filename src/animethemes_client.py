@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Iterable, Iterator
+from collections.abc import Iterable, Iterator
+from typing import Any
 
 import httpx
 import pandas as pd
@@ -41,7 +42,9 @@ def _client(cfg: Config) -> httpx.Client:
     wait=wait_exponential(multiplier=1, min=1, max=30),
     retry=retry_if_exception_type((httpx.HTTPError, httpx.TimeoutException)),
 )
-def _get_json(client: httpx.Client, url: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+def _get_json(
+    client: httpx.Client, url: str, params: dict[str, Any] | None = None
+) -> dict[str, Any]:
     r = client.get(url, params=params)
     if r.status_code == 429:
         raise httpx.HTTPError("rate limited")
@@ -61,8 +64,7 @@ def iter_anime_pages(cfg: Config, limit_pages: int | None = None) -> Iterator[di
         with tqdm(desc="animethemes pages", unit="page") as bar:
             while True:
                 payload = _get_json(client, url, params=params)
-                for anime in payload.get("anime", []):
-                    yield anime
+                yield from payload.get("anime", [])
                 page_idx += 1
                 bar.update(1)
                 if limit_pages is not None and page_idx >= limit_pages:
@@ -172,7 +174,10 @@ def fetch_anime_for_mal_id(client: httpx.Client, mal_id: int) -> dict[str, Any] 
     )
     anime_list = payload.get("anime") or []
     if len(anime_list) > 1:
-        log.warning("mal_id=%d matched %d AnimeThemes records, taking the first", mal_id, len(anime_list))
+        log.warning(
+            "mal_id=%d matched %d AnimeThemes records, taking the first",
+            mal_id, len(anime_list),
+        )
     return anime_list[0] if anime_list else None
 
 

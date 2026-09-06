@@ -39,4 +39,3 @@ data/*
 # Hugging Face / Torch caches
 .cache/
 hf_cache/
-experiments/

@@ -6,9 +6,10 @@ import sys
 
 import pandas as pd
 
-from . import animethemes_client, audio_download, embed, jikan_client
+from . import animethemes_client, audio_download, jikan_client
 from .config import Config
-from .embed import read_all_embeddings
+from .console import enable_utf8_output
+from .embed_store import read_all_embeddings
 
 log = logging.getLogger(__name__)
 
@@ -50,7 +51,9 @@ def build_dataset(cfg: Config) -> pd.DataFrame:
     if excluded:
         before = len(themes)
         themes = themes[~themes["theme_id"].astype(int).isin(excluded)]
-        log.info("Stage 5: excluded %d errored themes (%d → %d)", len(excluded), before, len(themes))
+        log.info(
+            "Stage 5: excluded %d errored themes (%d → %d)", len(excluded), before, len(themes)
+        )
 
     themes_n, mal_n = len(themes), len(mal)
     df = themes.merge(mal, on="mal_id", how="inner")
@@ -62,7 +65,10 @@ def build_dataset(cfg: Config) -> pd.DataFrame:
     before_embed = len(df)
     df = df.merge(
         embeddings[
-            ["theme_id", "embedding", "embed_model", "embed_version", "n_chunks_used", "total_seconds_used"]
+            [
+                "theme_id", "embedding", "embed_model", "embed_version",
+                "n_chunks_used", "total_seconds_used",
+            ]
         ],
         on="theme_id",
         how="inner",
@@ -86,6 +92,22 @@ def run_stage(
     top_n: int | None = None,
     top_by: str = "popularity",
 ) -> None:
+    def _embed() -> None:
+        # imported here, not at module scope: torch is an optional extra, so the
+        # other four stages must stay runnable without a 2.6 GB install
+        try:
+            from . import embed
+        except ImportError as e:
+            raise SystemExit(
+                f"stage 'embed' needs the optional embedding dependencies ({e.name} is "
+                f"missing). Install them with:\n\n"
+                f"    pip install -e \".[embed]\"\n\n"
+                f"See the README's GPU section first if you want a CUDA build of torch — "
+                f"the default wheel is CPU-only on Windows and ~18x slower here."
+            ) from e
+
+        embed.run(cfg, force_reembed=force_reembed)
+
     def _themes() -> None:
         if top_n is not None:
             if limit_pages is not None:
@@ -102,20 +124,21 @@ def run_stage(
     elif stage == "audio":
         audio_download.run(cfg)
     elif stage == "embed":
-        embed.run(cfg, force_reembed=force_reembed)
+        _embed()
     elif stage == "join":
         build_dataset(cfg)
     elif stage == "all":
         _themes()
         jikan_client.run(cfg)
         audio_download.run(cfg)
-        embed.run(cfg, force_reembed=force_reembed)
+        _embed()
         build_dataset(cfg)
     else:
         raise ValueError(f"unknown stage: {stage}")
 
 
 def main(argv: list[str] | None = None) -> int:
+    enable_utf8_output()
     parser = argparse.ArgumentParser(prog="anime-themes-recsys")
     parser.add_argument("command", choices=["run"])
     parser.add_argument("--stage", choices=STAGES, default="all")

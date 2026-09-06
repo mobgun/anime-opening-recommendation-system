@@ -3,7 +3,6 @@ from __future__ import annotations
 import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from typing import Iterable
 
 import httpx
 import pandas as pd
@@ -88,7 +87,9 @@ def download_all(cfg: Config, themes: pd.DataFrame) -> pd.DataFrame:
 
     dup_basenames = targets["audio_basename"].duplicated(keep=False)
     if dup_basenames.any():
-        offenders = targets.loc[dup_basenames, ["audio_id", "audio_basename"]].head(10).to_dict("records")
+        offenders = (
+            targets.loc[dup_basenames, ["audio_id", "audio_basename"]].head(10).to_dict("records")
+        )
         raise SystemExit(
             f"Duplicate audio_basename values would overwrite each other on disk. "
             f"Sample: {offenders}. Fix Stage 1 output before re-running Stage 3."

@@ -91,9 +91,11 @@ def main(argv: list[str] | None = None) -> int:
     todo = [(n, m["mbid"]) for n, m in resolved.items() if m["mbid"] not in cache]
     log.info("%d cached, %d to fetch", len(cache), len(todo))
 
-    client = httpx.Client(headers={"User-Agent": "anime-themes-recsys/0.1 (+research)"}, timeout=60.0)
+    client = httpx.Client(
+        headers={"User-Agent": "anime-themes-recsys/0.1 (+research)"}, timeout=60.0
+    )
     try:
-        for name, mbid in tqdm(todo, desc="listenbrainz", unit="artist"):
+        for _name, mbid in tqdm(todo, desc="listenbrainz", unit="artist"):
             cache[mbid] = fetch_one(client, mbid)
             time.sleep(MIN_INTERVAL)
             if len(cache) % 25 == 0:
@@ -114,7 +116,10 @@ def main(argv: list[str] | None = None) -> int:
     # How much of this is usable depends on overlap: a neighbour only counts if it is
     # also an artist somewhere in our own corpus.
     ours = {m["mbid"] for m in resolved.values()}
-    internal = {k: [n for n in v if n["mbid"] in ours and n["mbid"] != k] for k, v in with_data.items()}
+    internal = {
+        k: [n for n in v if n["mbid"] in ours and n["mbid"] != k]
+        for k, v in with_data.items()
+    }
     useful = {k: v for k, v in internal.items() if v}
     log.info(
         "%d artists have >=1 behaviourally similar artist that is ALSO in this corpus "

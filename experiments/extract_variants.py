@@ -190,7 +190,8 @@ def main(argv: list[str] | None = None) -> int:
 
     written: list[str] = []
     variants: list[tuple[str, dict[int, list[float]], str]] = [
-        (f"layer{li:02d}", vecs, f"{cfg.embed_model}#layer{li}") for li, vecs in sorted(layer_vecs.items())
+        (f"layer{li:02d}", vecs, f"{cfg.embed_model}#layer{li}")
+        for li, vecs in sorted(layer_vecs.items())
     ]
     if not args.skip_mfcc:
         variants.append((MFCC_VARIANT, mfcc_vecs, "librosa-mfcc-chroma-contrast"))

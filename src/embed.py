@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 import logging
-from pathlib import Path
-from typing import Iterable
 
 import numpy as np
 import pandas as pd
@@ -10,6 +8,12 @@ import torch
 from tqdm import tqdm
 
 from .config import Config
+from .embed_store import (
+    check_invalidation,
+    read_all_embeddings,
+    shard_paths,
+    write_shard,
+)
 
 log = logging.getLogger(__name__)
 
@@ -78,7 +82,10 @@ class MERTEmbedder:
 
     @torch.inference_mode()
     def embed(self, audio: np.ndarray) -> tuple[np.ndarray, int, float]:
-        """Returns (vector, n_chunks_used, total_seconds_used). Mean-pools only over real samples."""
+        """Returns (vector, n_chunks_used, total_seconds_used).
+
+        Mean-pools only over real samples.
+        """
         chunks, real_lens = self._split_chunks(audio)
         if not chunks:
             raise ValueError("audio shorter than one chunk")
@@ -116,75 +123,12 @@ class MERTEmbedder:
         return vec, len(chunks), total_seconds
 
 
-def _shard_paths(cfg: Config) -> list[Path]:
-    if not cfg.embeddings_dir.exists():
-        return []
-    return sorted(cfg.embeddings_dir.glob("part_*.parquet"))
-
-
-def read_all_embeddings(cfg: Config) -> pd.DataFrame:
-    """Read every shard plus the legacy single-file store, if present."""
-    frames: list[pd.DataFrame] = []
-    for p in _shard_paths(cfg):
-        frames.append(pd.read_parquet(p))
-    if cfg.embeddings_parquet.exists():
-        frames.append(pd.read_parquet(cfg.embeddings_parquet))
-    if not frames:
-        return pd.DataFrame()
-    if len(frames) == 1:
-        return frames[0]
-    return pd.concat(frames, ignore_index=True)
-
-
-def _next_shard_path(cfg: Config) -> Path:
-    cfg.embeddings_dir.mkdir(parents=True, exist_ok=True)
-    parts = _shard_paths(cfg)
-    next_idx = (int(parts[-1].stem.split("_")[-1]) + 1) if parts else 1
-    return cfg.embeddings_dir / f"part_{next_idx:06d}.parquet"
-
-
-def _check_invalidation(cfg: Config, force_reembed: bool) -> pd.DataFrame:
-    """Load existing embeddings, validating model match. Wipe shards + legacy on --force-reembed."""
-    existing = read_all_embeddings(cfg)
-    if existing.empty:
-        return existing
-    bad_model = existing["embed_model"] != cfg.embed_model
-    bad_version = existing["embed_version"] != cfg.embed_version
-    if (bad_model | bad_version).any():
-        if force_reembed:
-            log.warning(
-                "embeddings store contained mismatched model/version; wiping due to --force-reembed"
-            )
-            for p in _shard_paths(cfg):
-                p.unlink()
-            cfg.embeddings_parquet.unlink(missing_ok=True)
-            return pd.DataFrame()
-        offending = existing.loc[bad_model | bad_version, ["embed_model", "embed_version"]]
-        sample = offending.drop_duplicates().head(5).to_dict("records")
-        raise SystemExit(
-            f"embeddings store at {cfg.embeddings_dir} (and legacy {cfg.embeddings_parquet}) "
-            f"contains rows with a different embed_model/embed_version than config "
-            f"(config={cfg.embed_model}/{cfg.embed_version}). "
-            f"Offending entries (sample): {sample}. "
-            f"Delete the files or rerun with --force-reembed."
-        )
-    return existing
-
-
-def _write_shard(cfg: Config, new_rows: list[dict]) -> int:
-    if not new_rows:
-        return 0
-    path = _next_shard_path(cfg)
-    pd.DataFrame(new_rows).to_parquet(path, index=False)
-    return len(new_rows)
-
-
 def embed_all(cfg: Config, force_reembed: bool = False) -> pd.DataFrame:
     """Stage 4: produce 768-dim MERT embedding per theme via 3x30s mean-pooling."""
     import librosa
 
     cfg.ensure_dirs()
-    existing = _check_invalidation(cfg, force_reembed)
+    existing = check_invalidation(cfg, force_reembed)
     done_theme_ids: set[int] = (
         set(existing["theme_id"].astype(int).tolist()) if not existing.empty else set()
     )
@@ -202,7 +146,9 @@ def embed_all(cfg: Config, force_reembed: bool = False) -> pd.DataFrame:
     flush_every = cfg.embed_flush_every
     written = 0
 
-    for row in tqdm(targets.itertuples(index=False), total=len(targets), desc="embed", unit="theme"):
+    for row in tqdm(
+        targets.itertuples(index=False), total=len(targets), desc="embed", unit="theme"
+    ):
         theme_id = int(row.theme_id)
         audio_id = int(row.audio_id)
         audio_basename = str(row.audio_basename)
@@ -238,10 +184,10 @@ def embed_all(cfg: Config, force_reembed: bool = False) -> pd.DataFrame:
             )
 
         if len(new_rows) >= flush_every:
-            written += _write_shard(cfg, new_rows)
+            written += write_shard(cfg, new_rows)
             new_rows = []
 
-    written += _write_shard(cfg, new_rows)
+    written += write_shard(cfg, new_rows)
 
     if error_rows:
         existing_errors = (
@@ -258,7 +204,7 @@ def embed_all(cfg: Config, force_reembed: bool = False) -> pd.DataFrame:
         "Stage 4: wrote %d new embeddings; store now has %d rows across %d shard(s)",
         written,
         len(final),
-        len(_shard_paths(cfg)),
+        len(shard_paths(cfg)),
     )
     return final
 

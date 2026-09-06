@@ -29,6 +29,7 @@ import numpy as np
 import pandas as pd
 
 from .config import Config
+from .console import enable_utf8_output
 from .recommend import MODE_SCALE, Recommender
 
 log = logging.getLogger(__name__)
@@ -175,7 +176,11 @@ class Evaluator:
         name_to_mbid = load_artist_mbids(rec.cfg)
         self.neighbours = load_behavioural_neighbours(rec.cfg)
         self.theme_mbids: list[set[str]] = [
-            {name_to_mbid[str(a)] for a in (arr if arr is not None else []) if str(a) in name_to_mbid}
+            {
+                name_to_mbid[str(a)]
+                for a in (arr if arr is not None else [])
+                if str(a) in name_to_mbid
+            }
             for arr in df["artist_names"].to_numpy()
         ]
 
@@ -213,7 +218,6 @@ class Evaluator:
             order = self._ranked_indices(i)
             if len(order) < control_k:
                 continue
-            head = order[:control_k]
 
             seed_g = self.genre_sets[i]
             if seed_g:
@@ -451,6 +455,7 @@ def _print_report(res: Results) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
+    enable_utf8_output()
     parser = argparse.ArgumentParser(prog="animethemes-evaluate")
     parser.add_argument(
         "--control-k", type=int, default=10, help="top-k used for the genre/era controls"
